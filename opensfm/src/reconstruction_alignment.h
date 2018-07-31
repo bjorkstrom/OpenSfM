@@ -512,6 +512,13 @@ class ReconstructionAlignment {
     common_cameras_.push_back(c);
   }
 
+  struct ErrorTerm {
+    ceres::ResidualBlockId error_id_;
+    double weight_;
+    ErrorTerm(ceres::ResidualBlockId error_id, double weight)
+        : error_id_(error_id), weight_(weight) {}
+  };
+
   void Run() {
 
     ceres::Problem problem;
@@ -533,6 +540,143 @@ class ReconstructionAlignment {
         problem.SetParameterUpperBound(i.second.parameters, RA_RECONSTRUCTION_SCALE, std::numeric_limits<double>::max());
       }
     }
+
+#if 1
+    std::map< int, std::vector<ErrorTerm> > errors_groups;
+
+    // Add relative-absolute position errors
+    for (auto &a : relative_absolute_positions_) {
+      ceres::CostFunction *cost_function =
+          new ceres::AutoDiffCostFunction<RARelativeAbsolutePositionError, 3,
+                                          7>(
+              new RARelativeAbsolutePositionError(
+                  a.position, a.shot->parameters, a.std_deviation));
+
+      auto loss_function = new ceres::LossFunctionWrapper(
+          new ceres::ScaledLoss(nullptr, 1.0, ceres::DO_NOT_TAKE_OWNERSHIP),
+          ceres::TAKE_OWNERSHIP);
+      auto error_id = problem.AddResidualBlock(
+          cost_function, loss_function, a.reconstruction->parameters);
+      errors_groups[0].emplace_back(error_id, 1.0);
+    }
+
+    // Add common cameras constraints
+    for (auto &a : common_cameras_) {
+      ceres::CostFunction *cost_function =
+          new ceres::AutoDiffCostFunction<RACommonCameraError, 6, 7, 7>(
+              new RACommonCameraError(
+                  a.shot_a->parameters, a.shot_b->parameters,
+                  a.std_deviation_center, a.std_deviation_rotation));
+
+      auto loss_function = new ceres::LossFunctionWrapper(
+          new ceres::ScaledLoss(nullptr, 1.0, ceres::DO_NOT_TAKE_OWNERSHIP),
+          ceres::TAKE_OWNERSHIP);
+      auto error_id = problem.AddResidualBlock(
+          cost_function, loss_function, a.reconstruction_a->parameters,
+          a.reconstruction_b->parameters);
+      errors_groups[1].emplace_back(error_id, 1.0);
+    }
+
+    // Add common point errors
+    for (auto &a : common_points_) {
+      ceres::CostFunction *cost_function =
+          new ceres::AutoDiffCostFunction<RACommonPointError, 3, 7, 7>(
+              new RACommonPointError(a.point_a, a.point_b, a.std_deviation));
+
+      auto loss_function = new ceres::LossFunctionWrapper(
+          new ceres::ScaledLoss(nullptr, 1.0, ceres::DO_NOT_TAKE_OWNERSHIP),
+          ceres::TAKE_OWNERSHIP);
+      auto error_id = problem.AddResidualBlock(cost_function, loss_function,
+                               a.reconstruction_a->parameters,
+                               a.reconstruction_b->parameters);
+      errors_groups[2].emplace_back(error_id, 1.0);
+    }
+
+    const int em_iterations = 10;
+    for( int i = 0; i < em_iterations; ++i)
+    {
+      // re-weighting step : assumption of gaussian distribution
+      for(auto& group : errors_groups)
+      {
+        // compute covariance
+
+        // use Ceres to call residuals computation
+        ceres::Problem::EvaluateOptions evaluate_options;
+        evaluate_options.apply_loss_function = false;
+        for(const auto term : group.second)
+        {
+          evaluate_options.residual_blocks.push_back(term.error_id_);
+        }
+        std::vector<double> group_residuals;
+        problem.Evaluate(evaluate_options, nullptr, &group_residuals, nullptr, nullptr);
+
+        // compute centered covariance
+        const auto count_errors = group.second.size();
+        const auto error_size =
+            problem.GetCostFunctionForResidualBlock(group.second[0].error_id_)
+                ->num_residuals();
+        Eigen::MatrixXd residuals(count_errors, error_size);
+        for( int j = 0; j < count_errors; ++j)
+        {
+          for( int k = 0; k < error_size; ++k)
+          {
+            residuals(j,k) = group_residuals[j*error_size+k];
+          }
+        }
+
+        Eigen::MatrixXd covariance(error_size,error_size);
+        covariance.setZero();
+        for (int j = 0; j < count_errors; ++j) 
+        {
+          const Eigen::VectorXd error = residuals.row(j);
+          for (int k = 0; k < error_size; ++k) 
+          {
+            for (int l = 0; l < error_size; ++l) 
+            {
+              covariance(k, l) += error(k) * error(l);
+            }
+          }
+        }
+        covariance /= double(count_errors);
+
+        // compute distribution term
+        const Eigen::MatrixXd inverse_covariance = covariance.inverse();
+        const double determinant = covariance.determinant();
+        Eigen::VectorXd gaussian_assignments(count_errors);
+        for( int j = 0; j < count_errors; ++j)
+        {
+          const Eigen::VectorXd error = residuals.row(j);
+          gaussian_assignments(j) = error.dot(inverse_covariance*error);
+        }
+
+        // read-out assignment
+        const auto uniform = 1e-4;
+        const auto normalizer = 1.0/std::sqrt(std::pow(2.0*M_PI, error_size)*determinant);
+        for( int j = 0; j < count_errors; ++j)
+        {
+          const auto gaussian = normalizer*std::exp(-0.5*gaussian_assignments(j));
+          group.second[i].weight_ = gaussian / (gaussian + uniform);
+
+          // get wrapper and reset to a new ScaledLoss with new value
+          ceres::LossFunctionWrapper *wrapper =
+              (ceres::LossFunctionWrapper *)problem
+                  .GetLossFunctionForResidualBlock(group.second[j].error_id_);
+          wrapper->Reset(new ceres::ScaledLoss(nullptr, group.second[i].weight_,
+                                               ceres::DO_NOT_TAKE_OWNERSHIP),
+                         ceres::TAKE_OWNERSHIP);
+        }
+      }
+
+      // Solve
+      ceres::Solver::Options options;
+      options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+      options.num_threads = 8;
+      options.num_linear_solver_threads = 8;
+      options.max_num_iterations = 30;
+
+      ceres::Solve(options, &problem, &last_run_summary_);
+    }
+#else
 
     // Add relative motion errors
     ceres::LossFunction *loss = new ceres::CauchyLoss(1.0);
@@ -605,6 +749,7 @@ class ReconstructionAlignment {
     options.max_num_iterations = 500;
 
     ceres::Solve(options, &problem, &last_run_summary_);
+   #endif 
   }
 
   std::string BriefReport() {
