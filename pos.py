@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 
 import numpy as np
+from opensfm import io
 from opensfm import types
 from opensfm import dataset
 from opensfm import matching
+from opensfm import features
 from opensfm.reconstruction import resect
 from opensfm.reconstruction import run_absolute_pose_ransac
 from opensfm.reconstruction import bundle_single_view
 from opensfm.reconstruction import get_image_metadata
 
-DATASET = "data/bat0"
+DATASET = "data/bat0sans"
 
 
 #
@@ -90,56 +92,85 @@ def my_resect(bs, Xs, data, camera, graph, reconstruction, shot_id):
         return False, report
 
 
+def detect_features(data):
+    img_data = io.imread("data/bat0sans/08.jpg")
 
-def calculate_img_pos(shot_id):
+    p_unsorted, f_unsorted, c_unsorted = features.extract_features(
+        img_data, data.config, None)
+
+    size = p_unsorted[:, 2]
+    order = np.argsort(size)
+    p_sorted = p_unsorted[order, :]
+    f_sorted = f_unsorted[order, :]
+    c_sorted = c_unsorted[order, :]
+
+    return p_sorted, f_sorted, c_sorted
+
+
+def add_image_track_to_graph(graph, image, track_id, img_point):
+    graph.add_node(image, bipartite=0)
+    graph.add_node(str(track_id), bipartite=1)
+
+    (x, y) = (img_point[0], img_point[1])
+    graph.add_edge(image,
+                   str(track_id),
+                          feature=(x, y),
+                   )
+                    # not include feature_id and color for now, TODO?
+#                          feature_id=featureid,
+#                          feature_color=(float(r), float(g), float(b)))
+
+
+def calculate_img_pos():
     data = dataset.DataSet(DATASET)
     features = load_feature_descriptions(data)
     graph = data.load_tracks_graph()
-#    tracks, images = matching.tracks_and_images(graph)
     reconstruction = data.load_reconstruction()[0]
 
-    img_points, img_features, _ = data.load_features(shot_id)
+    img_points, img_features, _ = detect_features(data)
 
     # use img_feature to get feature length and datatype
     # of an array for storing feature description
     cloud_features = np.empty((0, img_features.shape[1]),
                               dtype=img_features.dtype)
     cloud_coordinates = []
-    # test dumping features
+
+    track_ids = []
+
     for point_id, point in reconstruction.points.iteritems():
         cloud_features = np.vstack(
             (cloud_features, features[point.feature.img][point.feature.idx])
         )
         cloud_coordinates.append(point.coordinates)
 
+        # point ID is the same as track ID in the tracks graph
+        track_ids.append(point.id)
 
-    #print img_features.shape, cloud_features.shape
 
     matches = matching.match_symmetric(img_features, None,
                                        cloud_features, None,
                                        data.config)
 
-    exif = data.load_exif(shot_id)
+    exif = data.load_exif("01.jpg")
     camera = reconstruction.cameras[exif['camera']]
     bs = []
     Xs = []
 
+    shot_id = "new"
+
     for match in matches:
-        b = camera.pixel_bearing(img_points[match[0], :2])
+        img_point = img_points[match[0], :2]
+        b = camera.pixel_bearing(img_point)
         bs.append(b)
         Xs.append(cloud_coordinates[match[1]])
-        #print b, img_points[match[0], :2], "-->", cloud_coordinates[match[1]]
+
+        add_image_track_to_graph(graph,
+                                 shot_id,
+                                 track_ids[match[1]],
+                                 img_point)
 
     my_resect(bs, Xs, data, camera, graph, reconstruction, shot_id)
-#    print Xs
 
-#    print camera
+    data.save_reconstruction([reconstruction])
 
-
-
-for i in xrange(1, 11):
-    calculate_img_pos("%02d.jpg" % i)
-    # debug, only do one image
-    #break
-
-#calculate_img_pos("01.jpg")
+calculate_img_pos()
