@@ -658,7 +658,14 @@ class Point(object):
         self.id = None
         self.color = None
         self.coordinates = None
+        self.feature = None
         self.reprojection_error = None
+
+
+class Feature(object):
+    def __init__(self):
+        self.img = None
+        self.idx = None
 
 
 class GroundControlPointObservation(object):

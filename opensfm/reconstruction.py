@@ -842,6 +842,9 @@ class TrackTriangulator:
             if X is not None:
                 point = types.Point()
                 point.id = track
+                point.feature = types.Feature()
+                point.feature.img = shot_id
+                point.feature.idx = self.graph[track][shot_id]['feature_id']
                 point.coordinates = X.tolist()
                 self.reconstruction.add_point(point)
 

@@ -130,6 +130,10 @@ def point_from_json(key, obj):
     point.id = key
     point.color = obj["color"]
     point.coordinates = obj["coordinates"]
+    point.feature = types.Feature()
+    point.feature.img = obj["feature"]["img"]
+    point.feature.idx = obj["feature"]["idx"]
+
     if "reprojection_error" in obj:
         point.reprojection_error = obj["reprojection_error"]
     return point
@@ -292,11 +296,19 @@ def point_to_json(point):
     """
     Write a point to a json object
     """
-    return {
+    d =  {
         'color': list(point.color),
         'coordinates': list(point.coordinates),
         'reprojection_error': point.reprojection_error
     }
+
+    if point.feature is not None:
+        d['feature'] = {
+            'img' : point.feature.img,
+            'idx' : point.feature.idx
+        }
+
+    return d
 
 
 def reconstruction_to_json(reconstruction):
